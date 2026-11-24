@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Reference baseline for a bank project where browsers use APIs for all data.
+    // Integrate with any existing rules after testing their effective access.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

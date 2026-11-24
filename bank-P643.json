@@ -1,0 +1,14 @@
+{
+  "bankId": "P643",
+  "bankName": "Cashzilla Bank",
+  "ifsc": "ARTH0C2V7DK",
+  "firebaseProjectId": "cashzilla-bank",
+  "firestoreLocation": "asia-south1",
+  "githubOwner": "vmartheesh",
+  "githubRepo": "cashzilla-bank",
+  "testUserEmail": "artheesh@user.com",
+  "accountId": "P643-001",
+  "accountNumber": "P64300000001",
+  "brandColor": "#204abe",
+  "openingBalancePaise": 100000
+}

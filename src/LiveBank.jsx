@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Button, Chip, MenuItem, TextField } from '@mui/material';
-import { ArrowLeftRight, Globe2, Landmark, List, LogOut, RefreshCw, Send } from 'lucide-react';
+import { ArrowLeftRight, Landmark, List, Send } from 'lucide-react';
 import { toPaise } from './amount';
-import { configuredEndpoint, liveApi, parseEndpoint, readStorage, saveStorage } from './live-api';
-import './live.css';
+import { configuredEndpoint, liveApi, readStorage, saveStorage } from './live-api';
+import { CustomerWorkspace, AccountActions, Directory, CustomerServices, Beneficiaries, useBeneficiaries, downloadFile } from './Workspaces';
 
 const money = minor => new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(minor / 100);
 const time = value => value ? new Intl.DateTimeFormat('en-IN', {
@@ -18,34 +18,44 @@ const rejectionNames = {
   LIMIT_EXCEEDED: 'Transfer limit exceeded',
   DESTINATION_ACCOUNT_UNAVAILABLE: 'The destination is unavailable',
 };
+const ifscPattern = /^[A-Z]{4}0[A-Z0-9]{6}$/;
+const accountNumberPattern = /^[A-Za-z0-9-]{4,40}$/;
 const byId = (directory, id) => directory.find(bank => bank.bankId === id)?.bankName || id;
 
-function TransferForm({ bank, accounts, directory, send }) {
+function TransferForm({ bank, accounts, directory, directoryState, reloadDirectory, send, beneficiaries }) {
   const [type, setType] = useState('interbank');
   const [from, setFrom] = useState('');
   const [destination, setDestination] = useState('');
   const [number, setNumber] = useState('');
-  const [amount, setAmount] = useState('200');
+  const [amount, setAmount] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const sources = accounts.filter(account => account.status === 'ACTIVE');
   const fromId = sources.some(item => item.accountId === from) ? from : (sources[0]?.accountId || '');
   const routes = directory.filter(item => item.bankId !== bank.id && item.status === 'ACTIVE');
-  const route = destination ? (routes.find(item => item.ifsc === destination)?.ifsc || '') : (routes[0]?.ifsc || '');
-  const target = type === 'internal' ? bank.ifsc : route;
+  const ifsc = destination.trim().toUpperCase();
+  const validIfsc = ifscPattern.test(ifsc);
+  const recipientBank = directory.find(item => item.ifsc === ifsc);
+  const target = type === 'internal' ? bank.ifsc : validIfsc ? ifsc : '';
+  const amountMinor = toPaise(amount);
+  const accountNumber = number.trim();
+  const unavailable = type === 'interbank' && (ifsc === bank.ifsc ||
+    (directoryState === 'ready' && validIfsc && recipientBank?.status !== 'ACTIVE'));
+  let destinationHelp = 'Enter the receiving bank’s 11-character IFSC.';
+  if (ifsc === bank.ifsc) destinationHelp = 'Select Same bank for this IFSC.';
+  else if (recipientBank?.status === 'ACTIVE') destinationHelp = recipientBank.bankName;
+  else if (validIfsc && directoryState === 'ready') destinationHelp = recipientBank
+    ? 'This bank is inactive in SharedBank.' : 'This IFSC is missing from the SharedBank directory.';
+  const canSubmit = fromId && target && !unavailable && accountNumberPattern.test(accountNumber) && amountMinor !== null;
 
   async function submit(event) {
     event.preventDefault();
     setError('');
-    const amountMinor = toPaise(amount);
-    if (!fromId || !target || !number.trim() || amountMinor === null) {
-      setError('Choose a source, destination and positive amount with at most two decimal places.');
-      return;
-    }
+    if (busy || !canSubmit) return;
     setBusy(true);
     try {
       await send({ fromAccountId: fromId, destinationIfsc: target,
-        destinationAccountNumber: number.trim(), amountMinor, currency: 'INR' });
+        destinationAccountNumber: accountNumber, amountMinor, currency: 'INR' });
       setNumber('');
     } catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
@@ -65,15 +75,35 @@ function TransferForm({ bank, accounts, directory, send }) {
           {account.accountNumber} · {money(account.availableMinor)} available
         </MenuItem>)}
       </TextField>
-      {type === 'interbank' && <TextField select label="Destination bank" required value={route}
-        onChange={e => setDestination(e.target.value)} disabled={busy || !routes.length}>
-        {routes.map(item => <MenuItem key={item.ifsc} value={item.ifsc}>{item.bankName} · {item.ifsc}</MenuItem>)}
+      {beneficiaries.length > 0 && <TextField select label="Saved beneficiary" value=""
+        disabled={busy} onChange={event => {
+          const recipient = beneficiaries.find(item => item.id === event.target.value);
+          if (!recipient) return;
+          setType(recipient.ifsc === bank.ifsc ? 'internal' : 'interbank');
+          setDestination(recipient.ifsc);
+          setNumber(recipient.accountNumber);
+        }}>
+        <MenuItem value="">Choose a saved beneficiary</MenuItem>
+        {beneficiaries.map(item => <MenuItem key={item.id} value={item.id}>{item.name} · {item.ifsc}</MenuItem>)}
       </TextField>}
+      {type === 'interbank' && <>
+        <TextField label="Destination IFSC" required value={destination}
+          onChange={e => setDestination(e.target.value.toUpperCase())} disabled={busy}
+          error={unavailable} helperText={destinationHelp} />
+        {routes.length > 0 && <TextField select label="Choose from active banks" value={routes.some(item => item.ifsc === ifsc) ? ifsc : ''}
+          onChange={e => setDestination(e.target.value)} disabled={busy}>
+          <MenuItem value="">Choose a bank</MenuItem>
+          {routes.map(item => <MenuItem key={item.ifsc} value={item.ifsc}>{item.bankName} · {item.ifsc}</MenuItem>)}
+        </TextField>}
+        {directoryState === 'error' && <Alert severity="warning" action={<Button onClick={reloadDirectory}>Retry</Button>}>
+          The bank list could not load. SharedBank can still check an IFSC when you submit.
+        </Alert>}
+      </>}
       <TextField label="Destination account number" required value={number} onChange={e => setNumber(e.target.value)} disabled={busy} />
       <TextField label="Amount in INR" required value={amount} onChange={e => setAmount(e.target.value)} disabled={busy}
         slotProps={{ htmlInput: { inputMode: 'decimal' } }} />
       {error && <Alert severity="error">{error}</Alert>}
-      <div><Button type="submit" variant="contained" disabled={busy || !fromId || !target} startIcon={<Send size={16} />}>
+      <div><Button type="submit" variant="contained" disabled={busy || !canSubmit} startIcon={<Send size={16} />}>
         {busy ? 'Submitting…' : 'Submit transfer'}
       </Button></div>
     </form>
@@ -81,7 +111,19 @@ function TransferForm({ bank, accounts, directory, send }) {
 }
 
 function Activity({ rows, directory }) {
-  return <section className="panel"><header className="panel-head"><div><h2>Transfer activity</h2><p>Latest 50 transfers for this user</p></div><List size={19} /></header>
+  function exportTransfers() {
+    const csvCell = value => {
+      const text = String(value ?? '');
+      const safe = /^[\s]*[=+@-]/.test(text) ? "'" + text : text;
+      return '"' + safe.replaceAll('"', '""') + '"';
+    };
+    const header = ['Transfer ID', 'Date (IST)', 'Source bank', 'Destination bank', 'Direction', 'Amount (INR)', 'Status'];
+    const data = rows.map(row => [row.transferId, time(row.createdAt), byId(directory, row.sourceBankId),
+      byId(directory, row.destinationBankId), row.direction, (row.amountMinor / 100).toFixed(2), row.status]);
+    const csv = [header, ...data].map(row => row.map(csvCell).join(',')).join('\r\n');
+    downloadFile(new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' }), 'cashzilla-transfers.csv');
+  }
+  return <section className="panel"><header className="panel-head"><div><h2>Transfer activity</h2><p>Latest 50 transfers for this user</p></div>{rows.length ? <Button onClick={exportTransfers}>Download CSV</Button> : <List size={19} />}</header>
     {rows.length ? <div className="table-scroll"><table>
       <thead><tr><th>Transfer</th><th>Route</th><th>Amount</th><th>Status</th></tr></thead>
       <tbody>{rows.map(row => <tr key={row.transferId}>
@@ -98,20 +140,16 @@ function Activity({ rows, directory }) {
   </section>;
 }
 
-export default function LiveBank({ bank, switchUrl, openDemo }) {
-  const urlKey = 'x42-cloudflare-worker-url';
-  const [base, setBase] = useState(() => configuredEndpoint || readStorage(localStorage, urlKey, ''));
-  const [session, setSession] = useState(null);
+export default function LiveBank({ bank, session, tab, logout }) {
+  const beneficiaryResource = useBeneficiaries(session.token);
+  const base = configuredEndpoint;
   const prefix = '/banks/' + bank.id;
-  const [url, setUrl] = useState(base);
-  const [editUrl, setEditUrl] = useState(!base);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
   const [data, setData] = useState({ accounts: [], transfers: [] });
   const [directory, setDirectory] = useState([]);
+  const [directoryState, setDirectoryState] = useState('loading');
+  const [directoryAttempt, setDirectoryAttempt] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const activeToken = useRef(null);
   activeToken.current = session?.token;
@@ -127,13 +165,11 @@ export default function LiveBank({ bank, switchUrl, openDemo }) {
     } catch (failure) {
       if (signal?.aborted || activeToken.current !== session.token) return;
       if (failure.status === 401) {
-        setSession(null);
-        setData({ accounts: [], transfers: [] });
-        setLoaded(false);
+        logout();
       }
       setError(failure.message);
     }
-  }, [base, prefix, session]);
+  }, [base, prefix, session, logout]);
 
   useEffect(() => {
     if (!session) return undefined;
@@ -152,41 +188,16 @@ export default function LiveBank({ bank, switchUrl, openDemo }) {
   useEffect(() => {
     if (!session) return undefined;
     const controller = new AbortController();
+    setDirectoryState('loading');
     liveApi(base, '/directory/banks', { signal: controller.signal })
-      .then(value => setDirectory(value.banks || []))
-      .catch(failure => { if (!controller.signal.aborted) setError(failure.message); });
+      .then(value => {
+        if (controller.signal.aborted) return;
+        setDirectory(value.banks || []);
+        setDirectoryState('ready');
+      })
+      .catch(() => { if (!controller.signal.aborted) setDirectoryState('error'); });
     return () => controller.abort();
-  }, [base, session]);
-
-  function logout() {
-    setSession(null);
-    setLoaded(false);
-    setData({ accounts: [], transfers: [] });
-    setNote('');
-  }
-
-  async function signIn(event) {
-    event.preventDefault();
-    setBusy(true);
-    setError('');
-    try {
-      const value = await liveApi(base, prefix + '/sign-in', { data: { email: email.trim(), password } });
-      setSession(value);
-    } catch (failure) { setError(failure.message); }
-    finally { setPassword(''); setBusy(false); }
-  }
-
-  function connect(event) {
-    event.preventDefault();
-    setError('');
-    try {
-      const endpoint = parseEndpoint(url);
-      if (endpoint !== base) { logout(); setDirectory([]); }
-      saveStorage(localStorage, urlKey, endpoint);
-      setBase(endpoint);
-      setEditUrl(false);
-    } catch (failure) { setError(failure.message); }
-  }
+  }, [base, session, directoryAttempt]);
 
   async function send(transfer) {
     const raw = JSON.stringify([bank.id, base, session.uid, transfer]);
@@ -205,50 +216,33 @@ export default function LiveBank({ bank, switchUrl, openDemo }) {
     await refresh();
   }
 
-  return <div className="layout live-bank-layout">
-    <aside className="sidebar"><div className="brand"><span className="brand-icon"><Landmark size={23} /></span>
-      <span><strong>{bank.wordmark}</strong><small>BANKING PORTAL</small></span></div>
-      <nav aria-label="Bank actions">
-        {session && <button onClick={() => refresh()}><RefreshCw size={18} /> Refresh balances</button>}
-        {!configuredEndpoint && <button onClick={() => { setUrl(base); setEditUrl(!editUrl); }}><Globe2 size={18} /> Worker connection</button>}
-        {openDemo && <button onClick={openDemo}><ArrowLeftRight size={18} /> Browser demo</button>}
-        {session && <button onClick={logout}><LogOut size={18} /> Sign out</button>}
-      </nav>
-      <a className="switch-link" href={switchUrl}><Globe2 size={17} /> SharedBank switch</a>
-    </aside>
-    <div className="main">
-      <header className="topbar"><strong>{bank.name} · {bank.id}</strong><Chip label="Firestore test network" size="small" className="demo" /></header>
-      <main className="content live-bank-content">
-        <div className="page-head"><div><h1>{session ? 'Accounts and transfers' : 'Access your bank'}</h1>
-          <p>{session ? 'Signed in as ' + session.email : 'Connect to the Worker and use your bank’s Firebase test login.'}</p>
-        </div></div>
-        {error && <Alert severity="error">{error}</Alert>}
-        {note && <Alert severity="info" onClose={() => setNote('')}>{note}</Alert>}
-        {editUrl && <section className="panel"><header className="panel-head"><div><h2>Worker connection</h2>
-          <p>Use the same Cloudflare Worker URL across the bank pages.</p></div></header>
-          <form className="transfer-form" onSubmit={connect}><TextField label="Cloudflare Worker URL" fullWidth required value={url} onChange={e => setUrl(e.target.value)} />
-            <div><Button type="submit" variant="contained">Save connection</Button></div></form>
-        </section>}
-        {!session && base && !editUrl && <section className="panel live-sign-in"><header className="panel-head"><div><h2>Sign in to {bank.name}</h2>
-          <p>Use a customer enabled in this bank’s Firebase project.</p></div></header>
-          <form className="transfer-form" onSubmit={signIn}>
-            <TextField label="Email" type="email" autoComplete="username" required value={email} onChange={event => setEmail(event.target.value)} />
-            <TextField label="Password" type="password" autoComplete="current-password" required value={password} onChange={event => setPassword(event.target.value)} />
-            <div><Button type="submit" variant="contained" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</Button></div>
-          </form></section>}
-        {session && <>
-          {loaded && !data.accounts.length && <Alert severity="info">This Firebase user has no synthetic account in this bank. Attach an account to this Firebase UID.</Alert>}
-          {!loaded && <Alert severity="info">Loading your accounts and activity…</Alert>}
-          <div className="accounts">{data.accounts.map((account, i) =>
-            <section key={account.accountId} className={'account-card ' + (i === 0 ? 'primary-account' : 'light-account')}>
-              <div className="account-head"><span>{account.accountNumber}</span><Landmark size={19} /></div>
-              <div className="account-value">{money(account.availableMinor)}</div>
-              <div className="account-foot"><span>Available · Held {money(account.heldMinor)}</span><span>{account.accountId}</span></div>
-            </section>)}</div>
-          {data.accounts.length > 0 && <TransferForm bank={bank} accounts={data.accounts} directory={directory} send={send} />}
-          <Activity rows={data.transfers} directory={directory} />
-        </>}
-      </main>
-    </div>
-  </div>;
+  return <>
+    {error && <Alert severity="error">{error}</Alert>}
+    {note && <Alert severity="info" onClose={() => setNote('')}>{note}</Alert>}
+    {tab === 'accounts' && <>
+      {!loaded && !error && <Alert severity="info">Loading your accounts…</Alert>}
+      <div className="accounts">{data.accounts.map(account =>
+        <article key={account.accountId} className={'account-card ' + (account.status === 'ACTIVE' ? '' : 'inactive-card')}>
+          <div className="account-head"><span>{account.label}</span><Landmark size={24} /></div>
+          <span className="balance-label">Available balance</span>
+          <div className="account-value">{money(account.availableMinor)}</div>
+          <div className="account-foot"><span>{account.accountNumber}</span><span>{account.status === 'ACTIVE' ? 'Held ' + money(account.heldMinor) : 'Closed'}</span></div>
+          <AccountActions account={account} token={session.token} onChange={() => refresh()} />
+        </article>)}</div>
+    </>}
+    {tab === 'payments' && <>
+      {data.accounts.some(account => account.status === 'ACTIVE')
+        ? <TransferForm bank={bank} accounts={data.accounts} directory={directory} directoryState={directoryState}
+          reloadDirectory={() => setDirectoryAttempt(value => value + 1)} send={send}
+          beneficiaries={beneficiaryResource.data ?? []} />
+        : <Alert severity="info">An active account is needed to send transfers.</Alert>}
+      <Activity rows={data.transfers} directory={directory} />
+    </>}
+    {tab === 'services' && <CustomerServices token={session.token} />}
+    {tab === 'beneficiaries' && <Beneficiaries token={session.token} resource={beneficiaryResource} />}
+    {tab === 'directory' && <Directory token={session.token} directory={directory} directoryState={directoryState}
+      reloadDirectory={() => setDirectoryAttempt(value => value + 1)} />}
+    {['accounts', 'portfolio', 'loans'].includes(tab) &&
+      <CustomerWorkspace key={tab} tab={tab} token={session.token} active={data.accounts.some(account => account.status === 'ACTIVE')} />}
+  </>;
 }
